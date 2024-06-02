@@ -12,11 +12,15 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	pb "github.com/dvcrn/go-tinder/pb"
 	"github.com/gorilla/websocket"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type FilterOpt func(q *url.Values)
@@ -43,22 +47,24 @@ func WithDebug() ClientOpt {
 }
 
 type Client struct {
-	token     string
-	cookiejar *cookiejar.Jar
-	debug     bool
-	logger    *log.Logger
+	token              string
+	cookiejar          *cookiejar.Jar
+	debug              bool
+	logger             *log.Logger
+	persistentDeviceID string
 }
 
-func NewClient(token string, opts ...ClientOpt) *Client {
+func NewClient(token string, persistentDeviceID string, opts ...ClientOpt) *Client {
 	jar, _ := cookiejar.New(nil)
 	log := log.Default()
-	log.SetPrefix("[go-tinder]")
+	log.SetPrefix("[go-tinder] ")
 
 	c := &Client{
-		token:     token,
-		cookiejar: jar,
-		debug:     false,
-		logger:    log,
+		token:              token,
+		cookiejar:          jar,
+		debug:              false,
+		logger:             log,
+		persistentDeviceID: persistentDeviceID,
 	}
 
 	for _, opt := range opts {
@@ -75,7 +81,7 @@ func (c *Client) log(msg string, args map[string]string) {
 			argStrs = append(argStrs, fmt.Sprintf("%s=%s", k, v))
 		}
 
-		c.logger.Print(msg, strings.Join(argStrs, ", "))
+		c.logger.Print(msg, " ", strings.Join(argStrs, ", "))
 	}
 }
 
@@ -98,9 +104,9 @@ func (c *Client) createRequest(method string, url string, body []byte) (*http.Re
 	req.Header.Set("user-session-time-elapsed", "1704")
 	req.Header.Set("X-Auth-Token", c.token)
 	req.Header.Set("x-supported-image-formats", "jpeg")
+	req.Header.Set("persistent-device-id", c.persistentDeviceID)
 
 	// these don't seem needed
-	// req.Header.Set("persistent-device-id", "xxx")
 	// req.Header.Set("app-session-id", "xxx")
 	// req.Header.Set("user-session-id", "xxx")
 	// req.Header.Set("app-session-time-elapsed", "32828842")
@@ -108,12 +114,39 @@ func (c *Client) createRequest(method string, url string, body []byte) (*http.Re
 	return req, nil
 }
 
+func (c *Client) doRequestAndUnmarshalProto(req *http.Request, target protoreflect.ProtoMessage) error {
+	client := http.DefaultClient
+	client.Jar = c.cookiejar
+
+	c.log("sending request", map[string]string{
+		"url": req.URL.String(),
+	})
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	err = proto.Unmarshal(body, target)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c *Client) doRequestAndUnmarshal(req *http.Request, target any) error {
 	client := http.DefaultClient
 	client.Jar = c.cookiejar
 
 	c.log("sending request", map[string]string{
-		"url": req.RequestURI,
+		"url": req.URL.String(),
 	})
 
 	resp, err := client.Do(req)
@@ -232,6 +265,7 @@ func (c *Client) GetWsToken() (string, error) {
 	var responseObject struct {
 		Token string `json:"token"`
 	}
+
 	if err := c.doRequestAndUnmarshal(req, &responseObject); err != nil {
 		return "", err
 	}
@@ -257,45 +291,112 @@ type Nudge struct {
 //
 // Nudges are very simple currently. We need to guess the protobuf schema to figure out
 // what the nudges are actually for. This hasn't been done yet.
-func (c *Client) ConnectWebsocket(ctx context.Context, token string, nudgeChan chan (*Nudge)) error {
+func (c *Client) ConnectWebsocket(ctx context.Context, token string, nudgeChan chan (*pb.ClientData)) error {
 	wsURL := "wss://keepalive.gotinder.com/ws?token=" + token
 	c.log("starting websocket connection", map[string]string{
 		"url": wsURL,
 	})
 	headers := http.Header{}
 
+	ctx, cancel := context.WithCancel(ctx)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	ticker := time.NewTicker(time.Minute * 5)
+	pingTicker := time.NewTicker(time.Minute * 2)
+	noMessagesTimeout := time.NewTimer(time.Minute * 15)
+	defer cancel()
+	defer noMessagesTimeout.Stop()
+
+	conn.SetPingHandler(func(appData string) error {
+		c.log("websocket received ping", nil)
+		conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+		conn.WriteMessage(websocket.PongMessage, nil)
+		return nil
+	})
+
+	done := make(chan error)
+	go func() {
+		defer close(done)
+		for {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Minute))
+			c.log("waiting for websocket message", nil)
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				c.log("websocket err: ", map[string]string{
+					"err": err.Error(),
+				})
+
+				if errors.Is(err, os.ErrDeadlineExceeded) || os.IsTimeout(err) {
+					c.log("websocket received io.Timeout, aborting", map[string]string{
+						"err": err.Error(),
+					})
+
+					done <- &websocket.CloseError{
+						Code: websocket.CloseAbnormalClosure,
+						Text: "timeout reached without any new message. socket probably dead.",
+					}
+					return
+
+				}
+
+				done <- err
+				return
+			}
+			noMessagesTimeout.Reset(15 * time.Minute)
+
+			var clientData pb.ClientData
+			if err := proto.Unmarshal(message, &clientData); err != nil {
+				c.log("failed to unmarshal nudge", map[string]string{
+					"err": err.Error(),
+				})
+				continue
+			}
+
+			c.log("received websocket message", map[string]string{
+				"message":     clientData.String(),
+				"byte_length": strconv.FormatInt(int64(len(message)), 10),
+			})
+
+			nudgeChan <- &clientData
+		}
+
+		c.log("event loop exited somehow, not sure what happend here??", nil)
+	}()
+
+	// control loop
 	for {
 		select {
 		case <-ctx.Done():
 			c.log("context.Done() received", nil)
 			return nil
-		case <-ticker.C:
-			c.log("sending ping to websocket", nil)
-			if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				return err
-			}
-		default:
-			c.log("waiting for websocket message", nil)
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				return err
-			}
-			c.log("received websocket message", map[string]string{
-				"message":     string(message),
-				"byte_length": string(len(message)),
-			})
 
-			nudgeChan <- &Nudge{Time: time.Now().UTC(), Message: message}
+		case <-pingTicker.C:
+			c.log("sending ping to websocket", nil)
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return err
+			}
+
+		case err := <-done:
+			if err != nil {
+				c.log("received err from socket loop", map[string]string{
+					"err": err.Error(),
+				})
+			}
+			return err
+
+		case <-noMessagesTimeout.C:
+			c.log("timeout reached without any new message. socket probably dead.", nil)
+			return &websocket.CloseError{
+				Code: websocket.CloseAbnormalClosure,
+				Text: "timeout reached without any new message. socket probably dead.",
+			}
 		}
 	}
 
+	c.log("finished without errors, returning nil", nil)
 	return nil
 }
 
@@ -428,4 +529,50 @@ func (c *Client) SendMessage(userID, otherID, matchID, sessionID, message string
 	}
 
 	return &result, nil
+}
+
+func (c *Client) RefreshToken(refreshToken string) (*pb.LoginResult, error) {
+	u, err := url.Parse("https://api.gotinder.com/v3/auth/login?locale=en")
+	if err != nil {
+		return nil, err
+	}
+
+	factor := &pb.AuthGatewayRequest_RefreshAuth{
+		RefreshAuth: &pb.RefreshAuth{
+			RefreshToken: refreshToken,
+		},
+	}
+
+	gatewayReq := &pb.AuthGatewayRequest{
+		Factor: factor,
+	}
+
+	byteData, err := proto.Marshal(gatewayReq)
+	if err != nil {
+		log.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	req, err := c.createRequest(http.MethodPost, u.String(), byteData)
+	if err != nil {
+		return nil, err
+	}
+
+	// NOTE TO SELF: maybe persistent-device-id is generated on first login
+	// req.Header.Set("X-Auth-Token", "d789b8a3-c53d-4aa0-92a8-6f953c409bb1")
+	// req.Header.Set("persistent-device-id", randomDeviceID)
+	// req.Header.Set("persistent-device-id", "e02a2b63-9e91-496f-a9e6-d634b721fe07")
+	req.Header.Set("is-created-as-guest", "false")
+	req.Header.Set("Content-Type", "application/x-google-protobuf")
+
+	var result pb.AuthGatewayResponse
+	if err := c.doRequestAndUnmarshalProto(req, &result); err != nil {
+		return nil, err
+	}
+
+	loginResult := result.GetLoginResult()
+	if loginResult != nil {
+		c.token = loginResult.AuthToken
+	}
+
+	return loginResult, nil
 }

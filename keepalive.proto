@@ -1,0 +1,287 @@
+syntax = "proto3";
+
+package tinder.services.keepalive;
+
+option go_package = "github.com/dvcrn/go-tinder/pb";
+
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+
+message BackendWrapper {
+  ClientData client_data = 1;
+  google.protobuf.Timestamp start_time = 2;
+  string upstream_service = 3;
+  google.protobuf.Timestamp upstream_service_time = 4;
+  int64 user_number = 5;
+}
+
+message ClientData {
+  Meta meta = 1;
+  Error error = 2;
+  oneof payload {
+    Nudge nudge = 3;
+    Update update = 4;
+    google.protobuf.Empty ping = 5;
+    google.protobuf.Empty pong = 6;
+    TypingIndicator typing_indicator = 7;
+    TinderLiteData tinder_lite_data = 8;
+    EmailCollectionSettings email_collection_settings = 15;
+    MediaHydrationNudge media_hydration_nudge = 16;
+    InAppBanner in_app_banner = 17;
+    RoomReadyNudge room_ready_nudge = 18;
+    RoomInteractionNudge room_interaction_nudge = 19;
+    RoomTypingIndicator room_typing_indicator = 20;
+    RoomEvent room_event = 21;
+    Notification notification = 22;
+    InsendioCampaign insendio_campaign = 23;
+    DynamicUiNudge dynamic_ui_nudge = 24;
+    RefreshPullCampaign refresh_pull_campaign = 25;
+    ConnectNudge connect_nudge = 26;
+    DirectMessageNudge direct_message_nudge = 27;
+    RefreshProfileNudge refresh_profile_nudge = 28;
+  }
+}
+
+message Meta {
+  google.protobuf.Timestamp upstream_time = 1;
+  google.protobuf.Timestamp start_time = 2;
+}
+
+message Error {
+  int32 code = 1;
+  string message = 2;
+}
+
+message ConnectNudge {
+  string type = 1;
+}
+
+message DirectMessageNudge {
+  string type = 1;
+}
+
+message DynamicUiNudge {
+  string component_id = 1;
+  string component_type = 2;
+}
+
+message EmailCollectionSettings {
+  google.protobuf.Timestamp sent_time = 1;
+  bool email_prompt_required = 2;
+  bool email_prompt_dismissible = 3;
+  bool email_prompt_show_marketing_opt_in = 4;
+  bool email_prompt_show_strict_opt_in = 5;
+}
+
+message InAppBanner {
+  string campaign_id = 1;
+  string subject = 2;
+  string body = 3;
+  string color = 4;
+  string deeplink_url = 5;
+  string image_url = 6;
+  string crm_message_id = 7;
+}
+
+message InsendioCampaign {
+  int32 crm_campaign_id = 1;
+  string crm_experiment_name = 2;
+  string crm_variant_name = 3;
+  string crm_campaign_name = 4;
+  string crm_message_id = 5;
+  string crm_channel = 6;
+  string crm_channel_template = 7;
+  string deeplink_url = 8;
+}
+
+message ProcessedPhoto {
+  string url = 1;
+  int32 height = 2;
+  int32 width = 3;
+}
+
+message ProcessedVideo {
+  string url = 1;
+  int32 height = 2;
+  int32 width = 3;
+}
+
+message ImageType {
+  string url = 1;
+  int32 height = 2;
+  int32 width = 3;
+}
+
+message LoopType {
+  string url = 1;
+  int32 height = 2;
+  int32 width = 3;
+}
+
+message ShortVideoType {
+  string url = 1;
+  int32 height = 2;
+  int32 width = 3;
+  bool has_audio = 4;
+}
+
+message Asset {
+  oneof asset_type {
+    ImageType image = 1;
+    LoopType loop = 2;
+    ShortVideoType short_video = 3;
+  }
+}
+
+enum MediaType {
+  UNSET_MEDIA_TYPE = 0;
+  IMAGE_TYPE = 1;
+  LOOP_TYPE = 2;
+  SHORT_VIDEO_TYPE = 3;
+}
+
+message MediaHydrationNudge {
+  string media_id = 1;
+  string original_media_url = 2;
+  repeated ProcessedPhoto processed_photos = 3;
+  repeated ProcessedVideo processed_videos = 4;
+  repeated Asset assets = 5;
+  MediaType media_type = 6;
+}
+
+message Notification {
+  string type = 1;
+}
+
+message Nudge {
+  google.protobuf.Timestamp update_time = 1;
+  Type type = 2;
+}
+
+enum Type {
+  DEFAULT = 0;
+  NEW_MATCH = 1;
+  NEW_MESSAGE = 2;
+  MESSAGE_LIKE = 3;
+  MATCH_CLOSED = 4;
+  BOOST_SEEN = 5;
+  MATCH_MUTED = 6;
+  INBOX = 7;
+  NEW_MODAL = 8;
+  CONNECT = 9;
+}
+
+message RefreshPullCampaign {
+  PullType type = 1;
+}
+
+enum PullType {
+  MODAL = 0;
+}
+
+message RefreshProfileNudge {
+  google.protobuf.StringValue reason = 1;
+}
+
+enum RoomEventType {
+  END_ROOM = 0;
+  USER_JOINED = 1;
+  USER_LEFT = 2;
+  NEW_HOST = 3;
+  USER_BLOCKED = 4;
+  NEW_TITLE = 5;
+  USER_REPORTED = 6;
+  REPORT_ROOM = 7;
+}
+
+enum Reason {
+  REASON_NOT_APPLICABLE = 0;
+  HOST_ENDED = 1;
+  ROOM_TERMINATED = 2;
+  REPORTED_USER = 3;
+  USER_REPORT_ROOM = 4;
+}
+
+enum Role {
+  NOT_APPLICABLE = 0;
+  HOST = 1;
+  PARTICIPANT = 2;
+  AUDIENCE = 3;
+}
+
+message RoomEvent {
+  string room_id = 1;
+  RoomEventType room_event_type = 2;
+  google.protobuf.StringValue user_id = 3;
+  google.protobuf.StringValue name = 4;
+  Role role = 5;
+  Reason reason = 6;
+}
+
+message RoomInteractionNudge {
+  RoomType room_type = 1;
+  string room_id = 3;
+}
+
+message RoomReadyNudge {
+  RoomType room_type = 1;
+  string room_id = 2;
+}
+
+enum RoomType {
+  TYPE_INVALID = 0;
+  CHAT = 1;
+}
+
+message RoomTypingIndicator {
+  google.protobuf.Timestamp sent_time = 1;
+  string room_id = 2;
+  string from_user_id = 3;
+  repeated string to_user_ids = 4;
+}
+
+message StatusChange {
+  int64 user_number = 1;
+  google.protobuf.Timestamp time = 2;
+  Status status = 3;
+}
+
+enum Status {
+  UNKNOWN = 0;
+  ONLINE = 1;
+  OFFLINE = 2;
+}
+
+message TinderLiteData {
+  google.protobuf.Timestamp sent_time = 1;
+  string event = 2;
+  string sku = 3;
+  Receipt receipt = 4;
+  map<string, string> prices = 5;
+  repeated Purchase purchases = 6;
+  string transaction_id = 7;
+}
+
+message Receipt {
+  string signature = 1;
+  string receipt = 2;
+  string token = 3;
+}
+
+message Purchase {
+  string sku = 1;
+  string token = 2;
+  Receipt receipt = 3;
+}
+
+message TypingIndicator {
+  google.protobuf.Timestamp sent_time = 1;
+  string match_id = 2;
+  string to_user_id = 3;
+}
+
+message Update {
+  google.protobuf.Timestamp update_time = 1;
+}
